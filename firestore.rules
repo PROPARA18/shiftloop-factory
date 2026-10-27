@@ -1,0 +1,47 @@
+rules_version = '2';
+// Prototype: /workspaces/{uid}/records/{id} is a private, owner-managed workspace.
+// Required: kind (immutable enum), title/detail/group/person (bounded strings),
+// date (YYYY-MM-DD label), status (kind-specific enum), value/target (0..1e8),
+// updatedAt (epoch ms within 5 min). Optional: startedAt (immutable epoch ms).
+service cloud.firestore {
+ match /databases/{database}/documents {
+  function isOwner(uid) { return request.auth != null && request.auth.uid == uid; }
+  function text(v) { return v is string && v.size() <= 500; }
+  function amount(v) { return v is number && v >= 0 && v <= 100000000; }
+  function epoch(v) { return v is number && v >= 0 && v <= request.time.toMillis() + 300000; }
+  function validStatus(d) {
+   return (d.kind == 'workers' && d.status in ['Active','On leave','Inactive'])
+    || (d.kind == 'attendance' && d.status in ['On shift','Clocked out'])
+    || (d.kind == 'shifts' && d.status in ['Scheduled','Completed','Cancelled'])
+    || (d.kind in ['leave','overtime'] && d.status in ['Pending','Approved','Rejected'])
+    || (d.kind == 'tasks' && d.status in ['To do','In progress','Done'])
+    || (d.kind == 'production' && d.status in ['Running','Completed','Paused'])
+    || (d.kind == 'machines' && d.status in ['Running','Idle','Offline'])
+    || (d.kind == 'maintenance' && d.status in ['Open','In progress','Resolved'])
+    || (d.kind == 'safety' && d.status in ['Open','Investigating','Resolved'])
+    || (d.kind == 'inventory' && d.status in ['In stock','Low stock','Ordered'])
+    || (d.kind == 'training' && d.status in ['Scheduled','In progress','Completed'])
+    || (d.kind == 'announcements' && d.status in ['Published','Archived']);
+  }
+  function isValidRecord(d) {
+   return d.keys().hasAll(['kind','title','detail','group','person','date','status','value','target','updatedAt'])
+    && d.keys().hasOnly(['kind','title','detail','group','person','date','status','value','target','updatedAt','startedAt'])
+    && text(d.kind) && text(d.title) && d.title.size() > 0
+    && text(d.detail) && text(d.group) && text(d.person) && text(d.status)
+    && d.date is string && d.date.size() == 10 && d.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+    && amount(d.value) && amount(d.target) && validStatus(d)
+    && (!(d.kind in ['tasks','machines']) || (d.value <= 100 && d.target <= 100))
+    && (d.kind != 'training' || d.value <= d.target)
+    && epoch(d.updatedAt) && d.updatedAt >= request.time.toMillis() - 300000
+    && (!('startedAt' in d) || (d.kind == 'attendance' && epoch(d.startedAt)));
+  }
+  match /workspaces/{uid}/records/{recordId} {
+   allow read, delete: if isOwner(uid);
+   allow create: if isOwner(uid) && isValidRecord(request.resource.data);
+   allow update: if isOwner(uid) && isValidRecord(request.resource.data)
+    && request.resource.data.kind == resource.data.kind
+    && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['startedAt']);
+  }
+  match /{document=**} { allow read, write: if false; }
+ }
+}
